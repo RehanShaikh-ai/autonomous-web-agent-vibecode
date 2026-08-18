@@ -1,17 +1,15 @@
 import logging
-import uuid
 from typing import Any, Dict, List
 from fastapi import FastAPI, HTTPException, status
 from pydantic import BaseModel, Field
 
-from backend.integration.llm import LLMService, LLMServiceError
+from backend.integration.orchestrator import OrchestrationEngine
 from shared.schemas import (
     BrowserResult,
     FinalReport,
     GoalSchema,
     PlanStep,
     ProcessedPage,
-    SourceCitation,
 )
 
 # Configure logging according to configs/ruff.toml coding standard rules
@@ -27,8 +25,8 @@ app = FastAPI(
     version="0.1.0",
 )
 
-# Instantiate the local LLM service wrapper
-llm_service = LLMService()
+# Instantiate the active Orchestration Engine
+orchestrator = OrchestrationEngine()
 
 
 # Request/Response wrapper schemas
@@ -53,6 +51,7 @@ class ProcessRequest(BaseModel):
     goal_id: str
     step_id: int
     raw_html: str
+    source_domain: str = Field("unknown.com", description="Domain of page being processed.")
     extraction_keys: List[str] = Field(default_factory=list)
 
 
@@ -78,18 +77,14 @@ class HealthResponse(BaseModel):
 async def generate_plan(request: PlanRequest):
     """Processes user query, extracts goals and constraints, and plans steps."""
     logger.info("Received plan request: '%s'", request.query)
-    goal_id = f"goal_{uuid.uuid4().hex[:8]}"
-
-    try:
-        goal = llm_service.parse_user_goal(request.query, goal_id)
-        steps = llm_service.generate_plan(goal)
-        return PlanResponse(goal_id=goal_id, structured_goal=goal, steps=steps)
-    except LLMServiceError as e:
-        logger.error("LLM Service failure: %s", str(e))
+    if not request.query.strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
+            detail="Query objective cannot be empty.",
         )
+
+    goal, steps = orchestrator.start_new_run(request.query)
+    return PlanResponse(goal_id=goal.goal_id, structured_goal=goal, steps=steps)
 
 
 @app.post(
@@ -99,20 +94,19 @@ async def generate_plan(request: PlanRequest):
     summary="Execute Browser Navigation Step (Member B Scope)",
 )
 async def browse_page(request: BrowseRequest):
-    """Performs browser actions using Playwright. Mocks target result output."""
+    """Performs browser actions using Playwright. Connects to database session."""
     logger.info("Executing browser action '%s' for step %d", request.step.action, request.step.step_id)
-
-    # In execution, Member B's browser package will navigate and return raw html.
-    # Here we mock a successful navigation result.
-    target_url = request.step.url or "https://www.bestbuy.com/site/kindle"
-    return BrowserResult(
-        step_id=request.step.step_id,
-        status="success",
-        final_url=target_url,
-        raw_html="<html><body><div class='product-price'>$149.99</div></body></html>",
-        screenshot_path=f"/artifacts/screenshots/{request.goal_id}_step{request.step.step_id}.webp",
-        error_message=None,
-    )
+    try:
+        result = orchestrator.run_browser_step(
+            request.goal_id, request.step, request.browser_config
+        )
+        return result
+    except Exception as e:
+        logger.error("Failed executing step: %s", str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Browser execution failure: {e}",
+        )
 
 
 @app.post(
@@ -124,18 +118,17 @@ async def browse_page(request: BrowseRequest):
 async def process_page(request: ProcessRequest):
     """Cleans DOM tags, maps markdown text, and pulls core entity metrics."""
     logger.info("Processing page DOM for step ID: %d", request.step_id)
-
-    # In execution, Member C's clean, Markdown conversion and LLM extraction functions will run.
-    # Here we return structured Mock outputs.
-    cleaned_md = "### Kindle Paperwhite\n* Price: $149.99\n* Stock: In Stock"
-    entities = {"price": "$149.99", "stock_status": "In Stock"}
-
-    return ProcessedPage(
-        step_id=request.step_id,
-        source_domain="bestbuy.com",
-        cleaned_markdown=cleaned_md,
-        entities=entities,
-    )
+    try:
+        processed = orchestrator.run_process_step(
+            request.goal_id, request.step_id, request.raw_html, request.source_domain
+        )
+        return processed
+    except Exception as e:
+        logger.error("Processing failure: %s", str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"DOM processing failure: {e}",
+        )
 
 
 @app.post(
@@ -148,22 +141,27 @@ async def verify_data(request: VerifyRequest):
     """Cross-verifies facts across sources and outputs final unified comparison dashboard."""
     logger.info("Verifying facts for goal ID: %s", request.goal_id)
 
-    # In execution, Member C's verification logic checks assertion agreements.
-    # Here we compile a mock verified summary with a 1.0 confidence score.
-    citation1 = SourceCitation(
-        domain="bestbuy.com",
-        url="https://www.bestbuy.com/site/kindle",
-        screenshot_path="/artifacts/screenshots/bestbuy_1.webp",
-    )
+    # Reconstruct ProcessedPage objects from incoming request structure
+    processed_pages: List[ProcessedPage] = []
+    for idx, item in enumerate(request.extracted_data):
+        processed_pages.append(
+            ProcessedPage(
+                step_id=idx + 1,
+                source_domain=item.get("source", "unknown.com"),
+                cleaned_markdown="",
+                entities=item.get("entities", {}),
+            )
+        )
 
-    return FinalReport(
-        goal_id=request.goal_id,
-        summary="Verified: The Kindle price matches at $149.99.",
-        comparison_table=[{"source": "Best Buy", "price": "$149.99"}],
-        confidence_score=1.0,
-        contradictions=[],
-        sources=[citation1],
-    )
+    try:
+        report = orchestrator.run_verification(request.goal_id, processed_pages)
+        return report
+    except Exception as e:
+        logger.error("Verification failure: %s", str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Source verification failure: {e}",
+        )
 
 
 @app.get(
