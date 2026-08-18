@@ -1,0 +1,23 @@
+# Ruff Configuration for Autonomous Web Agent
+
+line-length = 100
+target-version = "py311"
+
+[lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # Pyflakes
+    "I",    # isort (import sorting)
+    "C90",  # McCabe complexity
+    "N",    # pep8-naming
+    "D",    # pydocstyle (docstrings enforcement)
+]
+
+ignore = [
+    "D100", # Missing docstring in public module (we can document at package level)
+    "D104", # Missing docstring in public package
+]
+
+[lint.pydocstyle]
+convention = "google"
