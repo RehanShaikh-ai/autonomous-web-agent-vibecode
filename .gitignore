@@ -6,6 +6,10 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
+# Databases
+*.db
+*.sqlite3
+
 # Environments
 venv/
 .env
