@@ -44,7 +44,8 @@ class SessionDatabase:
                         constraints TEXT NOT NULL,
                         status TEXT NOT NULL,
                         confidence_score REAL,
-                        final_report TEXT
+                        final_report TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
                 """)
                 # Steps table
@@ -223,6 +224,11 @@ class SessionDatabase:
 
                 session_dict = dict(session_row)
                 session_dict["constraints"] = json.loads(session_dict["constraints"])
+                if session_dict.get("final_report"):
+                    try:
+                        session_dict["final_report"] = json.loads(session_dict["final_report"])
+                    except Exception:
+                        pass
 
                 cursor.execute("SELECT * FROM steps WHERE goal_id = ? ORDER BY step_id ASC", (goal_id,))
                 session_dict["steps"] = [dict(r) for r in cursor.fetchall()]
@@ -234,3 +240,33 @@ class SessionDatabase:
         except sqlite3.Error as e:
             logger.error("Failed to retrieve session %s: %s", goal_id, str(e))
             raise DatabaseError(f"Get session failure: {e}")
+
+    def list_sessions(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """Lists recent agent execution sessions.
+
+        Args:
+            limit: Maximum count of sessions to return.
+
+        Returns:
+            List of session summary dictionaries.
+        """
+        try:
+            with self._get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT s.goal_id, s.objective, s.status, s.confidence_score, s.created_at,
+                           COUNT(st.step_id) as total_steps
+                    FROM sessions s
+                    LEFT JOIN steps st ON s.goal_id = st.goal_id
+                    GROUP BY s.goal_id
+                    ORDER BY s.created_at DESC
+                    LIMIT ?
+                """,
+                    (limit,),
+                )
+                rows = cursor.fetchall()
+                return [dict(r) for r in rows]
+        except sqlite3.Error as e:
+            logger.error("Failed to list sessions: %s", str(e))
+            raise DatabaseError(f"List sessions failure: {e}")

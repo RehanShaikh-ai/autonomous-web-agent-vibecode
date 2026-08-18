@@ -1,8 +1,10 @@
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from backend.integration.config import settings
 from backend.integration.orchestrator import OrchestrationEngine
 from shared.schemas import (
     BrowserResult,
@@ -25,11 +27,20 @@ app = FastAPI(
     version="0.1.0",
 )
 
+# Enable CORS for frontend clients (Member D)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Instantiate the active Orchestration Engine
 orchestrator = OrchestrationEngine()
 
 
-# Request/Response wrapper schemas
+# Request/Response schemas
 class PlanRequest(BaseModel):
     query: str = Field(..., description="Raw unstructured target search task.")
     max_steps: int = Field(default=5, description="Maximum execution step limits.")
@@ -62,6 +73,14 @@ class VerifyRequest(BaseModel):
     )
 
 
+class ExecuteMissionRequest(BaseModel):
+    query: str = Field(..., description="The objective to execute autonomously.")
+    max_steps: int = Field(default=5, description="Maximum execution step limit.")
+    browser_config: Optional[Dict[str, Any]] = Field(
+        default_factory=dict, description="Custom browser options (e.g. headless, timeouts)."
+    )
+
+
 class HealthResponse(BaseModel):
     status: str
     timestamp: str
@@ -72,7 +91,7 @@ class HealthResponse(BaseModel):
     "/api/v1/plan",
     response_model=PlanResponse,
     status_code=status.HTTP_200_OK,
-    summary="Generate Navigation Plan",
+    summary="Stage 1 & 2: Generate Navigation Plan",
 )
 async def generate_plan(request: PlanRequest):
     """Processes user query, extracts goals and constraints, and plans steps."""
@@ -83,7 +102,7 @@ async def generate_plan(request: PlanRequest):
             detail="Query objective cannot be empty.",
         )
 
-    goal, steps = orchestrator.start_new_run(request.query)
+    goal, steps = orchestrator.start_new_run(request.query, max_steps=request.max_steps)
     return PlanResponse(goal_id=goal.goal_id, structured_goal=goal, steps=steps)
 
 
@@ -91,7 +110,7 @@ async def generate_plan(request: PlanRequest):
     "/api/v1/browse",
     response_model=BrowserResult,
     status_code=status.HTTP_200_OK,
-    summary="Execute Browser Navigation Step (Member B Scope)",
+    summary="Stage 3: Execute Browser Navigation Step (Member B Scope)",
 )
 async def browse_page(request: BrowseRequest):
     """Performs browser actions using Playwright. Connects to database session."""
@@ -113,7 +132,7 @@ async def browse_page(request: BrowseRequest):
     "/api/v1/process",
     response_model=ProcessedPage,
     status_code=status.HTTP_200_OK,
-    summary="Sanitize HTML DOM and Extract Entities (Member C Scope)",
+    summary="Stage 3 (Cont): Sanitize HTML DOM and Extract Entities (Member C Scope)",
 )
 async def process_page(request: ProcessRequest):
     """Cleans DOM tags, maps markdown text, and pulls core entity metrics."""
@@ -135,13 +154,12 @@ async def process_page(request: ProcessRequest):
     "/api/v1/verify",
     response_model=FinalReport,
     status_code=status.HTTP_200_OK,
-    summary="Cross-Verify Sources and Deliver Report (Member C Scope)",
+    summary="Stage 4 & 5: Cross-Verify Sources and Deliver Report (Member C Scope)",
 )
 async def verify_data(request: VerifyRequest):
     """Cross-verifies facts across sources and outputs final unified comparison dashboard."""
     logger.info("Verifying facts for goal ID: %s", request.goal_id)
 
-    # Reconstruct ProcessedPage objects from incoming request structure
     processed_pages: List[ProcessedPage] = []
     for idx, item in enumerate(request.extracted_data):
         processed_pages.append(
@@ -164,6 +182,63 @@ async def verify_data(request: VerifyRequest):
         )
 
 
+@app.post(
+    "/api/v1/execute",
+    response_model=FinalReport,
+    status_code=status.HTTP_200_OK,
+    summary="Full Autonomous End-to-End Mission Execution",
+)
+async def execute_mission(request: ExecuteMissionRequest):
+    """Runs the complete 5-stage autonomous loop from raw query to final report."""
+    logger.info("Received end-to-end execution mission: '%s'", request.query)
+    if not request.query.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Query objective cannot be empty.",
+        )
+    try:
+        report = orchestrator.execute_mission_end_to_end(
+            raw_query=request.query,
+            max_steps=request.max_steps,
+            browser_config=request.browser_config,
+        )
+        return report
+    except Exception as e:
+        logger.error("Autonomous mission execution failed: %s", str(e), exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Autonomous mission failed: {e}",
+        )
+
+
+@app.get(
+    "/api/v1/sessions",
+    response_model=List[Dict[str, Any]],
+    status_code=status.HTTP_200_OK,
+    summary="List Recent Agent Execution Sessions",
+)
+async def list_sessions(limit: int = 50):
+    """Retrieves session list summaries from SQLite history cache."""
+    return orchestrator.list_recent_sessions(limit=limit)
+
+
+@app.get(
+    "/api/v1/sessions/{goal_id}",
+    response_model=Dict[str, Any],
+    status_code=status.HTTP_200_OK,
+    summary="Get Detailed Session Inspection and Timeline",
+)
+async def get_session_details(goal_id: str):
+    """Fetches full state, steps, and browser outcomes for a specific session."""
+    session = orchestrator.get_session_info(goal_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session with goal_id '{goal_id}' not found.",
+        )
+    return session
+
+
 @app.get(
     "/api/v1/health",
     response_model=HealthResponse,
@@ -178,7 +253,7 @@ async def health_check():
         timestamp="2026-08-18T11:14:23Z",
         services={
             "database": "connected",
-            "playwright": "available",
-            "llm_api": "accessible",
+            "orchestrator": "active",
+            "llm_api": "configured" if settings.LLM_API_KEY else "heuristic_fallback",
         },
     )
