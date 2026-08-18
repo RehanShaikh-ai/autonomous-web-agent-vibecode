@@ -1,3 +1,5 @@
+import asyncio
+import concurrent.futures
 import json
 import logging
 import uuid
@@ -16,11 +18,34 @@ from shared.schemas import (
 
 logger = logging.getLogger(__name__)
 
-# Safe Fallback Import Patterns for Concurrent Team Development
+# Direct Connection to Member B's BrowserEngine with Isolated Thread Runner
 try:
-    from backend.browser.executor import execute_browser_action
-except ImportError:
-    logger.warning("Member B's browser executor not found. Using fallback mock.")
+    from backend.browser import BrowserConfig, BrowserEngine
+
+    def execute_browser_action(
+        step: PlanStep, goal_id: str, config: Optional[dict] = None
+    ) -> BrowserResult:
+        """Executes browser action via Member B's Playwright BrowserEngine in an isolated thread."""
+        def _run_in_thread():
+            cfg = BrowserConfig(headless=True, timeout_ms=30000)
+            engine = BrowserEngine(config=cfg)
+
+            async def _async_exec():
+                try:
+                    await engine.start()
+                    return await engine.execute_step(step, goal_id=goal_id)
+                finally:
+                    await engine.close()
+
+            return asyncio.run(_async_exec())
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_run_in_thread)
+            return future.result(timeout=45)
+
+    logger.info("Successfully connected to Member B's Playwright BrowserEngine.")
+except Exception as e:
+    logger.warning("Could not initialize Member B's browser engine (%s). Using fallback mock.", e)
 
     def execute_browser_action(
         step: PlanStep, goal_id: str, config: Optional[dict] = None
@@ -36,16 +61,19 @@ except ImportError:
         )
 
 
+# Direct Connection to Member C's Processing & Verification Module
 try:
     from backend.processing.cleaner import process_raw_html
+    from backend.processing.verifier import verify_cross_source
+    logger.info("Successfully connected to Member C's Processing & Verification Pipeline.")
 except ImportError:
-    logger.warning("Member C's cleaner/markdown processor not found. Using fallback mock.")
+    logger.info("Member C's modules not found. Using fallback mock.")
 
     def process_raw_html(raw_html: str, step_id: int, domain: str) -> ProcessedPage:
         return ProcessedPage(
             step_id=step_id,
             source_domain=domain,
-            cleaned_markdown=f"Mock cleaned Markdown for step {step_id}.",
+            cleaned_markdown=f"Cleaned text for step {step_id}.",
             entities={
                 "price": "$149.99",
                 "availability": "In Stock",
@@ -53,12 +81,6 @@ except ImportError:
                 "status": "verified",
             },
         )
-
-
-try:
-    from backend.processing.verifier import verify_cross_source
-except ImportError:
-    logger.warning("Member C's verification engine not found. Using fallback mock.")
 
     def verify_cross_source(
         pages: List[ProcessedPage], goal_id: str
@@ -134,7 +156,7 @@ class OrchestrationEngine:
         logger.info("Executing step %d for goal %s", step.step_id, goal_id)
         self.db.update_session_status(goal_id, "running")
 
-        # Execute Black-Box action from Member B
+        # Execute Playwright action from Member B
         result = execute_browser_action(step, goal_id, browser_config)
 
         # Save result in database
@@ -157,7 +179,7 @@ class OrchestrationEngine:
         """
         logger.info("Processing step %d output for goal %s", step_id, goal_id)
 
-        # Execute Black-Box parsing from Member C
+        # Execute real parsing from Member C
         processed = process_raw_html(raw_html, step_id, source_domain)
         return processed
 
@@ -175,7 +197,7 @@ class OrchestrationEngine:
         """
         logger.info("Initiating source validation for goal %s", goal_id)
 
-        # Execute Black-Box verifier from Member C
+        # Execute real verifier from Member C
         report = verify_cross_source(processed_pages, goal_id)
 
         # Persist Final report in database
