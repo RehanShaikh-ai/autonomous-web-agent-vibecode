@@ -1,7 +1,3 @@
-<<<<<<< HEAD
-# Module Owned by Member C: Processing and Verification Specialist
-# Responsibilities: Ad-blocking logic, DOM cleaning, MarkItDown markdown rendering, entity extraction, source verification, confidence calculations.
-=======
 """Processing and Verification Package (Owned by Member C).
 
 Responsibilities:
@@ -42,4 +38,3 @@ __all__ = [
     "process_raw_html",
     "verify_cross_source",
 ]
->>>>>>> 4d8d5e7 (feat(process): complete processing & verification pipeline)
